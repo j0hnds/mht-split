@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+'use strict'
+
+/*
+ * Given an MHT file, split each of the parts into a separate file.
+ */
+
+const exec = require('child_process').exec
+const fs = require('fs')
+const readline = require('readline')
+const path = require('path')
+const program = require('commander')
+
+const PartDividerRE = /^------=/
+const ContentLocationRE = /^Content-Location: (.*)/
+const ContentTransferEncodingRE = /^Content-Transfer-Encoding: /
+const ContentTypeRE = /^Content-Type: (.+\/.+)/
+const DecodeExtensionsRE = /(wav|png|jpg|gif)$/
+
+program
+  .version('0.0.1')
+  .option('-d --decode', 'Decode the base64 files')
+  .option('-n --noop', 'Just list the parts rather than extracting them')
+  .option('-o --outdir <outdir>', 'Specify the path to the output directory', '.')
+  .parse(process.argv)
+
+console.log(`File name: ${program.args[0]}`)
+
+const decodeBase64 = async (encodedFile, decodedFile) => {
+  return new Promise((resolve, reject) => {
+    const cmd = `cat ${encodedFile} | base64 -d > ${decodedFile}`
+
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) return reject(err)
+      resolve({ stdout: stdout, stderr: stderr })
+    })
+  })
+}
+
+const readFile = async (inFilePath, outDirectory, noWrite, decode) => {
+  return new Promise((resolve, reject) => {
+    let outFile
+    let encodedFilePath
+    let decodedFilePath
+    let skipNextLine = false
+    const readLines = readline.createInterface({
+      input: fs.createReadStream(inFilePath),
+      output: process.stdout,
+      console: false
+    })
+
+    readLines.on('line', async (line) => {
+      const partDivider = line.match(PartDividerRE)
+      const contentLocation = line.match(ContentLocationRE)
+      const contentTransferEncoding = line.match(ContentTransferEncodingRE)
+      const contentType = line.match(ContentTypeRE)
+      if (partDivider) {
+        if (outFile) {
+          outFile.close()
+          outFile = null
+          if (decode && decodedFilePath.match(DecodeExtensionsRE)) {
+            await decodeBase64(encodedFilePath, decodedFilePath)
+          }
+        }
+      } else if (contentLocation) {
+        decodedFilePath = path.join(outDirectory, path.basename(contentLocation[1]))
+        encodedFilePath = `${decodedFilePath}.b64`
+        if (noWrite) {
+          console.log(encodedFilePath)
+        } else {
+          outFile = fs.createWriteStream(encodedFilePath)
+        }
+      } else if (contentTransferEncoding) {
+        // Just ignore this line
+      } else if (contentType) {
+        // Ignore this line and skip the next line
+        skipNextLine = true
+      } else {
+        if (skipNextLine) {
+          skipNextLine = false
+        } else {
+          if (outFile) {
+            outFile.write(line + '\n')
+          }
+        }
+      }
+    })
+
+    readLines.on('close', () => {
+      if (outFile) {
+        outFile.close()
+        outFile = null
+      }
+      resolve()
+    })
+  })
+}
+
+readFile(program.args[0], program.outdir, program.noop, program.decode)
+  .then(() => process.exit)
+  .catch((err) => {
+    console.error(err)
+  })
